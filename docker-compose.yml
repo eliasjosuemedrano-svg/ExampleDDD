@@ -1,0 +1,156 @@
+# Definición de redes
+networks:
+  app_network:
+    driver: bridge
+
+# Definición de volúmenes para persistencia
+volumes:
+  mongodb_data:
+  mongodb_config:
+  mssql_data:
+  mssql_log:
+  mssql_backup:
+
+services:
+  # SQL Server
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    restart: unless-stopped
+    user: root
+    environment:
+      - ACCEPT_EULA=${MSSQL_ACCEPT_EULA}
+      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD}
+      - MSSQL_PID=${MSSQL_PID}
+      - MSSQL_TCP_PORT=${MSSQL_TCP_PORT}
+    ports:
+      - "${MSSQL_TCP_PORT}:${MSSQL_TCP_PORT}"
+      - "${MSSQL_SSMS_PORT}:1434"  # For SSMS connection
+    volumes:
+      - mssql_data:${MSSQL_DATA_DIR}
+      - mssql_log:${MSSQL_LOG_DIR}
+      - mssql_backup:${MSSQL_BACKUP_DIR}
+      - ./init-sql:/docker-entrypoint-initdb.d  # For initialization scripts
+    tmpfs:
+      - /var/opt/mssql/data
+      - /var/opt/mssql/log
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "${MSSQL_SA_PASSWORD}", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '${MSSQL_CPU_LIMIT:-2}'
+          memory: ${MSSQL_MEMORY_LIMIT:-4G}
+        reservations:
+          cpus: '${MSSQL_CPU_RESERVATION:-1}'
+          memory: ${MSSQL_MEMORY_RESERVATION:-2G}
+    ulimits:
+      nproc: 64000
+      nofile:
+        soft: 64000
+        hard: 64000
+    sysctls:
+      - net.core.somaxconn=4096
+      - net.ipv4.tcp_keepalive_time=300
+  
+  # Servicio principal de MongoDB
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-admin123}
+      MONGO_INITDB_DATABASE: ${MONGO_INITDB_DATABASE:-mydb}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+      - ./init-mongo:/docker-entrypoint-initdb.d
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '${MONGODB_CPU_LIMIT:-2}'
+          memory: ${MONGODB_MEMORY_LIMIT:-2G}
+        reservations:
+          cpus: '${MONGODB_CPU_RESERVATION:-1}'
+          memory: ${MONGODB_MEMORY_RESERVATION:-1G}
+    ulimits:
+      nproc: 64000
+      nofile:
+        soft: 64000
+        hard: 64000
+    sysctls:
+      - net.core.somaxconn=4096
+      - net.ipv4.tcp_keepalive_time=300
+
+  # MongoDB Express (Interfaz web)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    restart: unless-stopped
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-admin123}@mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: ${ME_CONFIG_BASICAUTH_USERNAME:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${ME_CONFIG_BASICAUTH_PASSWORD:-admin123}
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-admin123}
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      NODE_ENV: production
+    ports:
+      - "${MONGODB_EXPRESS_PORT:-8081}:8081"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - app_network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # MongoDB Exporter para monitoreo (opcional)
+  mongodb-exporter:
+    image: bitnami/mongodb-exporter:latest
+    container_name: mongodb-exporter
+    environment:
+      - MONGODB_URI=mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-admin123}@mongodb:27017/admin
+    ports:
+      - "9216:9216"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    networks:
+      - app_network
